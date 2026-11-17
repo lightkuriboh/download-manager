@@ -1,4 +1,6 @@
-//! Single-stream HTTP transfers with bounded application buffering.
+//! Streaming HTTP transfers and validated byte-range assembly.
+
+mod ranges;
 
 use std::{io, path::Path, time::Duration};
 
@@ -17,6 +19,8 @@ pub enum DownloadError {
     ContentEncoding,
     #[error("response body did not match its declared length")]
     Length,
+    #[error("range response did not match the requested representation and interval")]
+    RangeMismatch,
     #[error("destination already exists")]
     DestinationExists,
     #[error("filesystem operation failed: {0}")]
@@ -66,6 +70,17 @@ impl Downloader {
 
     /// Download to an explicit path, leaving any existing destination untouched.
     pub async fn download(&self, source: &str, destination: &Path) -> Result<u64, DownloadError> {
+        self.download_with_ranges(source, destination, std::num::NonZeroUsize::MIN)
+            .await
+    }
+
+    /// Allow multiple range requests for a replayable source. The limit is clamped to eight.
+    pub async fn download_with_ranges(
+        &self,
+        source: &str,
+        destination: &Path,
+        max_ranges: std::num::NonZeroUsize,
+    ) -> Result<u64, DownloadError> {
         let url = Url::parse(source).map_err(|_| DownloadError::InvalidUrl)?;
         if !allowed_url(&url) {
             return Err(DownloadError::InvalidUrl);
@@ -78,7 +93,7 @@ impl Downloader {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected a file path").into());
         }
 
-        let mut response = self
+        let response = self
             .client
             .get(url)
             .header(header::ACCEPT_ENCODING, "identity")
@@ -87,15 +102,7 @@ impl Downloader {
         if response.status() != StatusCode::OK {
             return Err(DownloadError::Status(response.status()));
         }
-        if response
-            .headers()
-            .get_all(header::CONTENT_ENCODING)
-            .iter()
-            .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        {
-            return Err(DownloadError::ContentEncoding);
-        }
-        let expected = response.content_length();
+        validate_encoding(&response)?;
         let parent = parent.to_owned();
         let staging = tokio::task::spawn_blocking(move || {
             tempfile::Builder::new()
@@ -105,19 +112,9 @@ impl Downloader {
         .await??;
         let staged_path = staging.path().join("payload");
         let mut file = File::create_new(&staged_path).await?;
-        let mut written = 0_u64;
-        while let Some(chunk) = response.chunk().await? {
-            written = written
-                .checked_add(chunk.len() as u64)
-                .ok_or(DownloadError::Length)?;
-            if expected.is_some_and(|expected| written > expected) {
-                return Err(DownloadError::Length);
-            }
-            file.write_all(&chunk).await?;
-        }
-        if expected.is_some_and(|expected| written != expected) {
-            return Err(DownloadError::Length);
-        }
+        let written = self
+            .transfer(response, &mut file, &staged_path, max_ranges.get().min(8))
+            .await?;
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
@@ -138,6 +135,39 @@ impl Downloader {
         .await??;
         Ok(written)
     }
+}
+
+fn validate_encoding(response: &reqwest::Response) -> Result<(), DownloadError> {
+    if response
+        .headers()
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+    {
+        return Err(DownloadError::ContentEncoding);
+    }
+    Ok(())
+}
+
+async fn copy_body(
+    mut response: reqwest::Response,
+    file: &mut File,
+    expected: Option<u64>,
+) -> Result<u64, DownloadError> {
+    let mut written = 0_u64;
+    while let Some(chunk) = response.chunk().await? {
+        written = written
+            .checked_add(chunk.len() as u64)
+            .ok_or(DownloadError::Length)?;
+        if expected.is_some_and(|expected| written > expected) {
+            return Err(DownloadError::Length);
+        }
+        file.write_all(&chunk).await?;
+    }
+    if expected.is_some_and(|expected| written != expected) {
+        return Err(DownloadError::Length);
+    }
+    Ok(written)
 }
 
 fn allowed_url(url: &Url) -> bool {
@@ -242,6 +272,83 @@ mod tests {
             );
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
             worker.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn segmented_download_validates_each_response_before_publication() {
+        const SIZE: usize = 14 * 1024 * 1024;
+        let payload: Vec<u8> = (0..SIZE).map(|offset| (offset % 251) as u8).collect();
+        for changed in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/file", listener.local_addr().unwrap());
+            let expected = payload.clone();
+            let server = thread::spawn(move || {
+                let mut starts = Vec::new();
+                // Initial GET, validation range, and three additional ranges.
+                for (index, connection) in (0..5).zip(listener.incoming()) {
+                    let mut socket = connection.unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut request = BufReader::new(&mut socket);
+                    let mut bounds = None;
+                    let mut conditional = false;
+                    loop {
+                        let mut line = String::new();
+                        if request.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some(value) = line.strip_prefix("range: bytes=") {
+                            let (start, end) = value.trim().split_once('-').unwrap();
+                            bounds = Some((
+                                start.parse::<usize>().unwrap(),
+                                end.parse::<usize>().unwrap(),
+                            ));
+                        }
+                        conditional |= line.trim() == "if-range: \"original\"";
+                    }
+                    if let Some((start, end)) = bounds {
+                        assert!(conditional);
+                        starts.push(start);
+                        let tag = if changed && index >= 2 {
+                            "changed"
+                        } else {
+                            "original"
+                        };
+                        write!(socket, "HTTP/1.1 206 Partial Content\r\nConnection: close\r\nETag: \"{tag}\"\r\nContent-Range: bytes {start}-{end}/{SIZE}\r\nContent-Length: {}\r\n\r\n", end - start + 1).unwrap();
+                        if changed && index >= 2 {
+                            thread::sleep(Duration::from_millis(100));
+                            break;
+                        }
+                        socket.write_all(&expected[start..=end]).unwrap();
+                    } else {
+                        assert_eq!(index, 0);
+                        write!(socket, "HTTP/1.1 200 OK\r\nConnection: close\r\nETag: \"original\"\r\nContent-Length: {SIZE}\r\n\r\n").unwrap();
+                        // A segmented client drops the original body after the prefix.
+                        socket.write_all(&expected[..1024 * 1024]).unwrap();
+                    }
+                }
+                starts
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("result");
+            let result = Downloader::new()
+                .unwrap()
+                .download_with_ranges(&url, &destination, std::num::NonZeroUsize::new(3).unwrap())
+                .await;
+            if changed {
+                assert!(matches!(result, Err(DownloadError::RangeMismatch)));
+                assert!(!destination.exists());
+            } else {
+                assert_eq!(result.unwrap(), SIZE as u64);
+                assert_eq!(std::fs::read(destination).unwrap(), payload);
+            }
+            let mut starts = server.join().unwrap();
+            if !changed {
+                starts.sort_unstable();
+                assert_eq!(starts, [1, 5, 9, 13].map(|n| n * 1024 * 1024));
+            }
         }
     }
 

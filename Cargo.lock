@@ -245,6 +245,7 @@ dependencies = [
 name = "download-engine"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "reqwest",
  "tempfile",
  "thiserror",

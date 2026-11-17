@@ -16,6 +16,9 @@ struct Args {
     /// Maximum simultaneously active files. Use 1 for sequential downloads.
     #[arg(short, long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=32))]
     jobs: u16,
+    /// Concurrent ranges per file for URLs that can safely be requested again
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=8))]
+    ranges: u16,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -33,11 +36,17 @@ async fn main() -> ExitCode {
         }
     };
 
+    let ranges = std::num::NonZeroUsize::new(usize::from(args.ranges)).unwrap();
     let jobs = args.urls.into_iter().zip(args.output).enumerate();
     let mut results = stream::iter(jobs)
         .map(|(index, (url, path))| {
             let downloader = &downloader;
-            async move { (index + 1, downloader.download(&url, &path).await) }
+            async move {
+                (
+                    index + 1,
+                    downloader.download_with_ranges(&url, &path, ranges).await,
+                )
+            }
         })
         .buffer_unordered(usize::from(args.jobs));
 

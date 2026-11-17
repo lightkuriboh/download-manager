@@ -19,9 +19,15 @@ cargo test --locked --workspace
 ```
 
 The default is up to three active files. Use `--jobs 1` for sequential transfers.
-Each file currently uses one request at a time. Persistent queues, resume,
-adaptive range transfers, the service, browser integration, desktop UI, and
-installers and updates remain planned features. The CLI has been tested on Linux.
+Each file uses one request by default. For large files from URLs that can be
+safely requested again, use `--ranges 4` to allow up to four concurrent byte ranges
+per file. The engine requires a strong ETag and validates every partial response
+before publication. If the initial range request returns a full response, the
+engine replaces its staged prefix with that full response.
+
+Persistent queues, restart resume, adaptive tuning, the service, browser
+integration, desktop UI, installers, and updates remain planned. The CLI has
+been tested on Linux.
 
 The [implementation plan](docs/implementation-plan.md) defines the architecture,
 installation modes, browser limitations, adaptive algorithm, release milestones,
