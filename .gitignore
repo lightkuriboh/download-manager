@@ -1,0 +1,15 @@
+/target/
+/dist/
+/artifacts/
+/coverage/
+**/node_modules/
+*.profraw
+*.profdata
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
