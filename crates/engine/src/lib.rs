@@ -1,6 +1,9 @@
 //! Streaming HTTP transfers and validated byte-range assembly.
 
 mod ranges;
+mod transport;
+
+use transport::{RequestBudget, TransferResponse};
 
 use std::{io, path::Path, time::Duration};
 
@@ -21,6 +24,10 @@ pub enum DownloadError {
     Length,
     #[error("range response did not match the requested representation and interval")]
     RangeMismatch,
+    #[error("invalid HTTP redirect")]
+    Redirect,
+    #[error("file was published but its directory could not be synced: {0}")]
+    PublicationSync(io::Error),
     #[error("destination already exists")]
     DestinationExists,
     #[error("filesystem operation failed: {0}")]
@@ -37,6 +44,7 @@ impl From<reqwest::Error> for DownloadError {
 
 pub struct Downloader {
     client: Client,
+    budget: RequestBudget,
 }
 
 impl Downloader {
@@ -48,24 +56,13 @@ impl Downloader {
             .no_brotli()
             .no_deflate()
             .no_zstd()
-            .redirect(redirect::Policy::custom(|attempt| {
-                let url = attempt.url();
-                if attempt.previous().len() > 10 {
-                    return attempt.error("too many redirects");
-                }
-                if !allowed_url(url)
-                    || (url.scheme() == "http"
-                        && attempt
-                            .previous()
-                            .last()
-                            .is_some_and(|url| url.scheme() == "https"))
-                {
-                    return attempt.error("redirect violates URL policy");
-                }
-                attempt.follow()
-            }))
+            .referer(false)
+            .redirect(redirect::Policy::none())
             .build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            budget: RequestBudget::default(),
+        })
     }
 
     /// Download to an explicit path, leaving any existing destination untouched.
@@ -93,12 +90,7 @@ impl Downloader {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected a file path").into());
         }
 
-        let response = self
-            .client
-            .get(url)
-            .header(header::ACCEPT_ENCODING, "identity")
-            .send()
-            .await?;
+        let response = self.get(url, None).await?;
         if response.status() != StatusCode::OK {
             return Err(DownloadError::Status(response.status()));
         }
@@ -123,7 +115,20 @@ impl Downloader {
         // target exists, including when another process creates it during transfer.
         let destination = destination.to_owned();
         tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            let directory = std::fs::File::open(
+                destination
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )?;
             let result = std::fs::hard_link(staged_path, destination);
+            #[cfg(unix)]
+            if result.is_ok() {
+                directory
+                    .sync_all()
+                    .map_err(DownloadError::PublicationSync)?;
+            }
             drop(staging);
             match result {
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -150,7 +155,7 @@ fn validate_encoding(response: &reqwest::Response) -> Result<(), DownloadError> 
 }
 
 async fn copy_body(
-    mut response: reqwest::Response,
+    mut response: TransferResponse<'_>,
     file: &mut File,
     expected: Option<u64>,
 ) -> Result<u64, DownloadError> {
@@ -186,7 +191,7 @@ mod tests {
         thread,
     };
 
-    fn serve(response: &'static [u8]) -> (String, thread::JoinHandle<()>) {
+    fn serve(response: impl AsRef<[u8]> + Send + 'static) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/file", listener.local_addr().unwrap());
         let worker = thread::spawn(move || {
@@ -202,9 +207,47 @@ mod tests {
                     break;
                 }
             }
-            connection.write_all(response).unwrap();
+            connection.write_all(response.as_ref()).unwrap();
         });
         (url, worker)
+    }
+
+    #[tokio::test]
+    async fn cross_origin_redirect_omits_source_referrer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = listener.local_addr().unwrap();
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target}/target\r\nContent-Length: 0\r\n\r\n"
+        );
+        let (source, redirect_server) = serve(redirect.into_bytes());
+        let target_server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                assert!(!line.to_ascii_lowercase().starts_with("referer:"));
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let result = Downloader::new()
+            .unwrap()
+            .download(
+                &format!("{source}?token=fixture"),
+                &dir.path().join("output"),
+            )
+            .await;
+        assert_eq!(result.unwrap(), 0);
+        redirect_server.join().unwrap();
+        target_server.join().unwrap();
     }
 
     #[test]

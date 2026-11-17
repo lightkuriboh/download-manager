@@ -7,7 +7,7 @@ use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt},
 };
 
-use crate::{DownloadError, Downloader, copy_body, validate_encoding};
+use crate::{DownloadError, Downloader, TransferResponse, copy_body, validate_encoding};
 
 const MIB: u64 = 1024 * 1024;
 const CHUNK_BYTES: u64 = 4 * MIB;
@@ -66,7 +66,7 @@ fn unique_header(response: &Response, name: header::HeaderName) -> Option<&heade
 impl Downloader {
     pub(super) async fn transfer(
         &self,
-        mut response: Response,
+        mut response: TransferResponse<'_>,
         file: &mut File,
         staged_path: &Path,
         concurrency: usize,
@@ -129,17 +129,12 @@ impl Downloader {
         &self,
         representation: &Representation,
         range: &Range<u64>,
-    ) -> Result<Response, DownloadError> {
-        Ok(self
-            .client
-            .get(representation.url.clone())
-            .header(header::ACCEPT_ENCODING, "identity")
-            .header(
-                header::RANGE,
-                format!("bytes={}-{}", range.start, range.end - 1),
-            )
-            .header(header::IF_RANGE, &representation.etag)
-            .send()
-            .await?)
+    ) -> Result<TransferResponse<'_>, DownloadError> {
+        let header = format!("bytes={}-{}", range.start, range.end - 1);
+        self.get(
+            representation.url.clone(),
+            Some((&header, &representation.etag)),
+        )
+        .await
     }
 }
