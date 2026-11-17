@@ -2,6 +2,10 @@
 
 Prepared 2026-11-17. Proposed design, not implemented behavior.
 
+The accompanying [technical design](technical-design.md) specifies component
+interfaces, data models, algorithms, recovery protocols, and verification gates
+for these milestones.
+
 ## 1. Product scope and assumptions
 
 Build a local-first download manager with a Rust engine that improves throughput

@@ -10,6 +10,10 @@ The [implementation plan](docs/implementation-plan.md) defines the architecture,
 installation modes, browser limitations, adaptive algorithm, release milestones,
 commit sequence, performance benchmarks, and 90% unit-test coverage policy.
 
+The [technical design](docs/technical-design.md) projects that plan into component
+contracts, IPC examples, database schema, transfer and scheduling algorithms,
+browser handoff recovery, platform installation, and transactional updates.
+
 The native application will use Rust. The Chromium Manifest V3 extension will
 use a small TypeScript adapter for browser APIs. Downloads will continue while
 the desktop application is closed.
