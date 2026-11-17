@@ -1,0 +1,10 @@
+[package]
+name = "downloadctl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+download-engine = { path = "../../crates/engine" }
+tokio = { version = "1", features = ["macros", "rt"] }
