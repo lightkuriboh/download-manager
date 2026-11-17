@@ -4,7 +4,7 @@ A planned Rust download manager for Linux, macOS, and Windows, with adaptive
 transfer tuning, a persistent background service, a minimal desktop application,
 and Chromium browser integration.
 
-**Status: initial command-line downloader.**
+**Status: command-line downloader and persistent queue worker.**
 
 The Rust CLI streams HTTP/HTTPS downloads to explicit output paths. It stages
 each file beside its destination, syncs the data, and publishes without
@@ -25,8 +25,24 @@ per file. The engine requires a strong ETag and validates every partial response
 before publication. If the initial range request returns a full response, the
 engine replaces its staged prefix with that full response.
 
-Persistent queues, restart resume, adaptive tuning, the service, browser
-integration, desktop UI, installers, and updates remain planned. The CLI has
+The foreground queue worker runs independently of submission commands. Use the
+same private state directory for each invocation.
+
+```sh
+cargo run --locked -p download-managerd -- --state-dir ./queue-state add https://example.com/ -o example.html
+cargo run --locked -p download-managerd -- --state-dir ./queue-state work --once
+cargo run --locked -p download-managerd -- --state-dir ./queue-state list
+```
+
+Queue submissions accept public URLs without query strings or embedded credentials
+and store those URLs locally in SQLite. Keep the worker running by omitting
+`--once`. Use `work --jobs 1` for sequential processing. If a worker exits during
+a job, its successor marks the job interrupted. Use `retry JOB_ID` to requeue it
+from the beginning after checking the destination. The worker currently uses
+single-stream transfers and queue clients access the local database directly.
+
+Restart resume, the service IPC protocol, adaptive tuning, browser integration,
+desktop UI, installers, and updates remain planned. The CLI and worker have
 been tested on Linux.
 
 The [implementation plan](docs/implementation-plan.md) defines the architecture,
