@@ -4,7 +4,24 @@ A planned Rust download manager for Linux, macOS, and Windows, with adaptive
 transfer tuning, a persistent background service, a minimal desktop application,
 and Chromium browser integration.
 
-**Status: implementation planning. No application code exists yet.**
+**Status: initial command-line downloader.**
+
+The Rust CLI streams HTTP/HTTPS downloads to explicit output paths. It stages
+each file beside its destination, syncs the data, and publishes without
+overwriting an existing file. Publication requires a filesystem that supports
+hard links. Completed files survive ordinary CLI errors on other jobs.
+
+```sh
+cargo run --locked -p downloadctl -- https://example.com/ -o example.html
+cargo run --locked -p downloadctl -- --jobs 1 \
+    https://example.com/ https://example.org/ -o example.html -o example-org.html
+cargo test --locked --workspace
+```
+
+The default is up to three active files. Use `--jobs 1` for sequential transfers.
+Each file currently uses one request at a time. Persistent queues, resume,
+adaptive range transfers, the service, browser integration, desktop UI, and
+installers and updates remain planned features. The CLI has been tested on Linux.
 
 The [implementation plan](docs/implementation-plan.md) defines the architecture,
 installation modes, browser limitations, adaptive algorithm, release milestones,

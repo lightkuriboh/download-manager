@@ -1,6 +1,6 @@
 # Technical design: adaptive cross-platform download manager
 
-Status: proposed implementation contract; no application code exists yet.
+Status: proposed implementation contract. The README tracks shipped CLI capabilities.
 Date: 2026-11-17. Design revision: 1.
 
 This document projects the [implementation plan](implementation-plan.md) into
