@@ -9,6 +9,18 @@ failure behavior. Numerical defaults are initial engineering choices to benchmar
 not demonstrated performance results. Rust/SQL examples describe the intended
 interfaces; they are not an implemented public API.
 
+The current service implements `hello`, `job.add`, `job.list`, `job.retry`,
+`job.pause`, `job.resume`, and `job.cancel` over a Unix socket. Stop requests are
+durable and visible in job listings while the worker drains. Control requests
+currently use job IDs and idempotency keys. Job revisions and events remain
+planned. Jobs can carry an expected SHA-256 digest checked before publication. It retains the starter queue's numeric IDs as
+decimal strings on the wire and has live cursor pagination. SQLite migrations
+preserve preexisting jobs and persist mutation receipts and the single-stream
+transfer journal. On Linux, a process-kill test verifies checkpoint recovery
+against a local HTTP origin. Publication recovery tests cover an existing link
+to the prepared payload and a same-size unrelated destination. See the
+[README](../README.md) for the current command surface and platform limits.
+
 ## 1. Scope, requirements, and invariants
 
 The product comprises a Rust per-user download service, Rust CLI, Rust/Iced desktop

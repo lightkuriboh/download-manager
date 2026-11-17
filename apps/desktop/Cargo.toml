@@ -1,0 +1,16 @@
+[package]
+name = "download-desktop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+download-protocol = { path = "../../crates/protocol" }
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland"] }
+
+[target.'cfg(unix)'.dependencies]
+download-platform = { path = "../../crates/platform" }
+
+[target.'cfg(windows)'.dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["process", "time"] }

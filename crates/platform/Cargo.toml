@@ -1,0 +1,8 @@
+[package]
+name = "download-platform"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
+tokio = { version = "1", features = ["net", "time"] }

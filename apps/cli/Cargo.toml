@@ -7,4 +7,6 @@ edition.workspace = true
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 download-engine = { path = "../../crates/engine" }
+download-platform = { path = "../../crates/platform" }
+download-protocol = { path = "../../crates/protocol" }
 tokio = { version = "1", features = ["macros", "rt"] }

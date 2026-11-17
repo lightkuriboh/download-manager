@@ -24,17 +24,7 @@ impl Representation {
         if !(8 * MIB..=i64::MAX as u64).contains(&length) {
             return None;
         }
-        let etag = unique_header(response, header::ETAG)?;
-        let bytes = etag.as_bytes();
-        let [b'"', inner @ .., b'"'] = bytes else {
-            return None;
-        };
-        if !inner
-            .iter()
-            .all(|&b| b == 0x21 || (0x23..=0x7e).contains(&b) || b >= 0x80)
-        {
-            return None;
-        }
+        let etag = strong_etag(response)?;
         Some(Self {
             url: response.url().clone(),
             etag: etag.clone(),
@@ -56,7 +46,25 @@ impl Representation {
     }
 }
 
-fn unique_header(response: &Response, name: header::HeaderName) -> Option<&header::HeaderValue> {
+pub(super) fn strong_etag(response: &Response) -> Option<&header::HeaderValue> {
+    let etag = unique_header(response, header::ETAG)?;
+    let bytes = etag.as_bytes();
+    let [b'"', inner @ .., b'"'] = bytes else {
+        return None;
+    };
+    if !inner
+        .iter()
+        .all(|&b| b == 0x21 || (0x23..=0x7e).contains(&b) || b >= 0x80)
+    {
+        return None;
+    }
+    Some(etag)
+}
+
+pub(super) fn unique_header(
+    response: &Response,
+    name: header::HeaderName,
+) -> Option<&header::HeaderValue> {
     let values = response.headers().get_all(name);
     let mut values = values.iter();
     let first = values.next()?;

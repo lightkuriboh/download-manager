@@ -6,9 +6,14 @@ edition.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 download-engine = { path = "../../crates/engine" }
+download-platform = { path = "../../crates/platform" }
+download-protocol = { path = "../../crates/protocol" }
+ring = "0.17"
 rusqlite = { version = "0.39", features = ["bundled"] }
 reqwest = { version = "0.13", default-features = false }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

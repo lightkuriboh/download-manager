@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Download Manager",
+  "version": "0.1.0",
+  "description": "Start and manage downloads using your browser's download queue.",
+  "minimum_chrome_version": "96",
+  "permissions": ["downloads", "contextMenus"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Download Manager" }
+}

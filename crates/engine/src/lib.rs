@@ -1,7 +1,12 @@
 //! Streaming HTTP transfers and validated byte-range assembly.
 
+mod checkpoint;
+mod digest;
 mod ranges;
 mod transport;
+
+pub use checkpoint::Checkpoint;
+pub use digest::Sha256;
 
 use transport::{RequestBudget, TransferResponse};
 
@@ -24,6 +29,12 @@ pub enum DownloadError {
     Length,
     #[error("range response did not match the requested representation and interval")]
     RangeMismatch,
+    #[error("could not record the durable download checkpoint")]
+    Checkpoint(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("expected a SHA-256 digest of 64 hexadecimal characters")]
+    InvalidDigest,
+    #[error("download does not match the expected SHA-256 digest")]
+    DigestMismatch,
     #[error("invalid HTTP redirect")]
     Redirect,
     #[error("file was published but its directory could not be synced: {0}")]
@@ -78,6 +89,17 @@ impl Downloader {
         destination: &Path,
         max_ranges: std::num::NonZeroUsize,
     ) -> Result<u64, DownloadError> {
+        self.download_verified(source, destination, max_ranges, None)
+            .await
+    }
+
+    pub async fn download_verified(
+        &self,
+        source: &str,
+        destination: &Path,
+        max_ranges: std::num::NonZeroUsize,
+        expected: Option<&Sha256>,
+    ) -> Result<u64, DownloadError> {
         let url = Url::parse(source).map_err(|_| DownloadError::InvalidUrl)?;
         if !allowed_url(&url) {
             return Err(DownloadError::InvalidUrl);
@@ -110,6 +132,9 @@ impl Downloader {
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
+        if let Some(digest) = expected {
+            digest.verify(&mut File::open(&staged_path).await?).await?;
+        }
 
         // Both paths are on the destination filesystem. hard_link fails if the
         // target exists, including when another process creates it during transfer.
@@ -210,6 +235,73 @@ mod tests {
             connection.write_all(response.as_ref()).unwrap();
         });
         (url, worker)
+    }
+
+    #[tokio::test]
+    async fn resumed_transfer_rejects_mismatched_partial_responses() {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        for reply in [
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nETag: \"other\"\r\nContent-Range: bytes 3-5/6\r\n\r\nxyz",
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nETag: \"original\"\r\nContent-Range: bytes 2-4/6\r\n\r\nxyz",
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n",
+        ] {
+            let (url, worker) = serve(reply);
+            let mut file = File::from_std(tempfile::tempfile().unwrap());
+            file.write_all(b"abc").await.unwrap();
+            file.flush().await.unwrap();
+            let checkpoint = Checkpoint {
+                offset: 3,
+                total: 6,
+                etag: b"\"original\"".to_vec(),
+            };
+            let error = Downloader::new()
+                .unwrap()
+                .download_durable(&url, &mut file, Some(checkpoint), |_| async {
+                    panic!("invalid range advanced the checkpoint")
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, DownloadError::RangeMismatch));
+            file.rewind().await.unwrap();
+            let mut body = Vec::new();
+            file.read_to_end(&mut body).await.unwrap();
+            assert_eq!(body, b"abc");
+            worker.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn full_response_retires_a_checkpoint_before_replacing_its_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let (url, worker) =
+            serve("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"new\"\r\n\r\nwxyz");
+        let mut file = File::from_std(tempfile::tempfile().unwrap());
+        file.write_all(b"abcde").await.unwrap();
+        file.flush().await.unwrap();
+        let checkpoint = Checkpoint {
+            offset: 3,
+            total: 6,
+            etag: b"\"original\"".to_vec(),
+        };
+        let mut retired = false;
+        let written = Downloader::new()
+            .unwrap()
+            .download_durable(&url, &mut file, Some(checkpoint), |replacement| {
+                assert!(replacement.is_none());
+                retired = true;
+                std::future::ready(Ok(()))
+            })
+            .await
+            .unwrap();
+        assert!(retired);
+        assert_eq!(written, 4);
+        file.rewind().await.unwrap();
+        let mut body = Vec::new();
+        file.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"wxyz");
+        worker.join().unwrap();
     }
 
     #[tokio::test]

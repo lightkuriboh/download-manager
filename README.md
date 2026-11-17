@@ -4,7 +4,7 @@ A planned Rust download manager for Linux, macOS, and Windows, with adaptive
 transfer tuning, a persistent background service, a minimal desktop application,
 and Chromium browser integration.
 
-**Status: command-line downloader and persistent queue worker.**
+**Status: command-line downloader and persistent queue worker with local IPC and restart recovery on Unix.**
 
 The Rust CLI streams HTTP/HTTPS downloads to explicit output paths. It stages
 each file beside its destination, syncs the data, and publishes without
@@ -25,8 +25,22 @@ per file. The engine requires a strong ETag and validates every partial response
 before publication. If the initial range request returns a full response, the
 engine replaces its staged prefix with that full response.
 
-The foreground queue worker runs independently of submission commands. Use the
-same private state directory for each invocation.
+The foreground queue worker runs independently of the CLI. Start it in one
+terminal and use the same private state directory in another. On Linux the
+directory must be owned by the current user with mode `0700` or stricter.
+
+```sh
+cargo run --locked -p download-managerd -- --state-dir ./queue-state work
+cargo run --locked -p downloadctl -- queue --state-dir ./queue-state add https://example.com/ -o example.html
+cargo run --locked -p downloadctl -- queue --state-dir ./queue-state list
+```
+
+`work --jobs 1` processes one file at a time. A submission prints its job ID.
+If a submission's reply is lost, repeat the command with the original
+`--idempotency-key` to retrieve its result without creating a duplicate job.
+The receipt lasts seven days.
+
+The original queue commands also support offline setup and batch runs.
 
 ```sh
 cargo run --locked -p download-managerd -- --state-dir ./queue-state add https://example.com/ -o example.html
@@ -34,16 +48,27 @@ cargo run --locked -p download-managerd -- --state-dir ./queue-state work --once
 cargo run --locked -p download-managerd -- --state-dir ./queue-state list
 ```
 
-Queue submissions accept public URLs without query strings or embedded credentials
-and store those URLs locally in SQLite. Keep the worker running by omitting
-`--once`. Use `work --jobs 1` for sequential processing. If a worker exits during
-a job, its successor marks the job interrupted. Use `retry JOB_ID` to requeue it
-from the beginning after checking the destination. The worker currently uses
-single-stream transfers and queue clients access the local database directly.
+Queue submissions accept public HTTP(S) URLs without query strings, fragments, or
+embedded credentials. The worker stores these URLs locally in SQLite and uses a
+single stream per file. On Unix, transfers with a known size and a strong ETag
+can resume automatically after a crash when the server confirms the saved
+representation. Redirected transfers currently have no restart checkpoints. Jobs
+interrupted without a usable checkpoint require an explicit `retry JOB_ID`.
+Use `retry JOB_ID --restart` to start over if resume or digest validation fails.
+Supply `--sha256 HEX_DIGEST` when adding a queued job to verify the complete file
+before publication.
+If publication encounters an existing file, move it out of the way before
+retrying. The worker retains the prepared download for that retry.
 
-Restart resume, the service IPC protocol, adaptive tuning, browser integration,
-desktop UI, installers, and updates remain planned. The CLI and worker have
-been tested on Linux.
+On Unix, use `downloadctl queue --state-dir ./queue-state pause JOB_ID` to stop a
+transfer and save a validated prefix. Use `resume JOB_ID` once the job is
+`paused`. Transfers without a usable checkpoint start from the beginning.
+`cancel JOB_ID` stops the job and retains its staged bytes. The command
+acknowledges the stop request, and `list` shows when the worker has stopped.
+
+The socket and recovery paths have been tested on Linux. Windows still uses the
+original SQLite queue commands. Named pipes, platform qualification, adaptive
+tuning, browser integration, desktop UI, installers, and updates remain planned.
 
 The [implementation plan](docs/implementation-plan.md) defines the architecture,
 installation modes, browser limitations, adaptive algorithm, release milestones,
